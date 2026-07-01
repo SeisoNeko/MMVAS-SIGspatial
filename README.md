@@ -36,7 +36,7 @@ This phase integrates the final predictions using two parallel modules:
 ├── train.py                    # Main training script (Phases 1-4 execution)
 ├── data/                       # All the raw data you should place
 ├── dataset/
-│   ├── mmVASdataset.py         # DataContainer, graph definitions, and collate functions
+│   ├── mmvasdataset.py         # DataContainer, graph definitions, and collate functions
 │   ├── preprocesser.py         # The process code to convert raw data into npz file if you use refresh_data in config.yaml
 ├── models/
 │   ├── GridLearner.py          # Phase 1: Multi-view GNN
