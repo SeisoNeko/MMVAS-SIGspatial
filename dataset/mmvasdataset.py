@@ -181,11 +181,11 @@ def collate_fn(batch):
         "grid_to_batch_idx": grid_to_batch_idx
     }
 
-class MMURGDataContainer:
+class MMVASDataContainer:
     """Data Container for managing spatial datasets, auto-caching, and lazy loading."""
 
     def __init__(self, config):
-        """Initializes the MMURGDataContainer, handling caching and dataset creation.
+        """Initializes the MMVASDataContainer, handling caching and dataset creation.
 
         Args:
             config (dict): Configuration dictionary containing dataset parameters and paths.

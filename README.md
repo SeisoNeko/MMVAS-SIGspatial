@@ -1,10 +1,10 @@
-# MMURG-Net: Multi-Modal Urban Region Graph Network
+# MMVAS-Net: Multi-Modal Urban Region Graph Network
 
-**MMURG-Net** is a spatial geographic deep learning architecture designed to predict continuous street-level land values and tax rates at a micro-grid level (100m hexes). The model operates on a dual-pathway system, explicitly separating macroscopic urban baseline values from microscopic commercial and structural outliers.
+**MMVAS-Net** is a spatial geographic deep learning architecture designed to predict continuous street-level land values and tax rates at a micro-grid level (100m hexes). The model operates on a dual-pathway system, explicitly separating macroscopic urban baseline values from microscopic commercial and structural outliers.
 
 ## Architecture & Data Pipeline
 
-The core philosophy of MMURG-Net is the residual prediction equation: 
+The core philosophy of MMVAS-Net is the residual prediction equation: 
 
 $$Prediction = Region\_Base + Grid\_Residual$$
 
@@ -36,7 +36,7 @@ This phase integrates the final predictions using two parallel modules:
 ├── train.py                    # Main training script (Phases 1-4 execution)
 ├── data/                       # All the raw data you should place
 ├── dataset/
-│   ├── mmurgdataset.py         # DataContainer, graph definitions, and collate functions
+│   ├── mmVASdataset.py         # DataContainer, graph definitions, and collate functions
 │   ├── preprocesser.py         # The process code to convert raw data into npz file if you use refresh_data in config.yaml
 ├── models/
 │   ├── GridLearner.py          # Phase 1: Multi-view GNN

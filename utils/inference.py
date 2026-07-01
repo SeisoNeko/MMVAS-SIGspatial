@@ -13,7 +13,7 @@ sys.path.append(os.getcwd())
 
 from models.AdaRegionGen import AdaRegionGen
 from models.DownStreamTask import DownstreamTaskModel
-from dataset.mmurgdataset import MMURGDataContainer, collate_fn 
+from dataset.mmvasdataset import MMVASDataContainer, collate_fn 
 
 def load_config(config_path="config.yaml"):
     """Loads the YAML configuration file.
@@ -47,7 +47,7 @@ def run_citywide_inference(args):
     print(f"Running citywide inference on device: {device}")
     
     print("\nLoading data container...")
-    data = MMURGDataContainer(
+    data = MMVASDataContainer(
         config=config
     )
     

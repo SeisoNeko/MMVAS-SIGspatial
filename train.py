@@ -23,7 +23,7 @@ from models.AdaRegionGen import AdaRegionGen
 from models.DownStreamTask import DownstreamTaskModel
 from models.loss import FusionSimilarityLoss, CustomMSELoss
 
-from dataset.mmurgdataset import MMURGDataContainer, collate_fn
+from dataset.mmvasdataset import MMVASDataContainer, collate_fn
 import gc
 
 def load_config(config_path="config.yaml"):
@@ -156,7 +156,7 @@ def train():
     logging.info(f"Random Seed: {config['global']['seed']}")
     logging.info(f"Dropout Rate: {dropout_rate}")
 
-    data = MMURGDataContainer(
+    data = MMVASDataContainer(
         config=config
     )
     m_cells = data.cell_dataset.num_cells
