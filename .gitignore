@@ -1,0 +1,43 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+satellite_downloads/
+mapillary_downloads/
+*.egg-info
+
+# Virtual environments
+.venv
+
+#data
+data/
+*.npz
+impute/data/
+dataset/*/*.md
+dataset/cache/
+dataset/inspection/
+dataset/qgis_verify_dataset.csv
+dataset/qgis_verify_dataset.gpkg
+
+#weights
+weights/
+weights_no_region/
+
+#training logs
+logs/
+
+#predict results
+result/
+
+# baseline
+baseline/
+spark/RAW_data/
+spark/data_loader/processed_data/
+spark/trained_models/
+
+#others
+*.db
+*.zip
+backup/

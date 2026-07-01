@@ -1,0 +1,111 @@
+# ==========================================
+# 1. 全域與環境設定 (Global & Env)
+# ==========================================
+global:
+  seed: 42
+  device: "cuda"
+
+# ==========================================
+# 2. 檔案路徑設定 (File Paths)
+# ==========================================
+paths:
+  # 基礎輸出與快取目錄
+  output_weights_dir: "your_output_weights_directory"    # train.py 儲存模型權重的位置
+  cache_dir: "your_cache_directory"       # 存放提取的 LLM Text & ResNet Features
+  log_dir: "your_log_directory"                  # 訓練日誌存放位置
+  result_dir: "your_result_directory"             # 最終測試集預測輸出 (CSV & GPKG)
+  
+  # 模型直接讀取的主資料檔
+  processed_npz: "your_processed_npz_file.npz"
+  
+  # 影像資料夾 (CellDataset & RegionDataset)
+  sat_images: "your_satellite_images_directory"
+  sv_images: "your_street_images_directory"
+
+  # cache name
+  sat_cache_name: "sat_features_100m.pt"
+  text_cache_name: "text_features_100m.pt"
+
+  # --- 以下為 preprocesser.py 需要的原始空間資料 ---
+  raw_data_dir: "your_raw_data_directory"
+  grid_1km: "grid/grid.gpkg"
+  grid_100m: "grid/grid_100m_hex.gpkg"
+  region: "region/tainan_village_3826.gpkg"
+  land_use_map: "landUse/land_use_map.csv"
+  land_use_gpkg: "landUse/land_use_res_1.gpkg"
+  farbac: "FARBAC/build_rate.gpkg"
+  poi: "POIs/tainan_pois.csv"
+  tax: "tax/100m_hex_tax_imputed.csv"
+
+# ==========================================
+# 3. 資料預處理與資料集超參數 (Data Processing)
+# ==========================================
+dataset:
+  grid_type: "100m"                  # 選擇 "1km" 或 "100m"
+  image_size: [224, 224]             # torchvision transform 的影像 Resize 大小, 改這裡沒用
+  knn_k: 18                           # Feature Graph (POI, LU, FARBAC) 的 k-NN 鄰居數
+  poi_min_occurrences: 10            # POI 類別出現少於此數值將被濾除
+  tax_seq_len: 3                     # 稅率歷史序列長度 (例如: 105, 108, 111 年)
+  tax_raw_dim: 3                     # 稅率原始維度 [Rate, Value, weighted_volumerate_avg]
+
+# ==========================================
+# 4. DataLoader 與切割比例 (Dataloader & Splits)
+# ==========================================
+dataloader:
+  train_ratio: 0.70                  # 訓練集比例
+  val_ratio: 0.15                    # 驗證集比例
+  test_ratio: 0.15                   # 測試集比例 (透過減法計算)
+  batch_size: 8                     # Phase 3 Region Enricher 的批次大小
+  num_workers: 4                     # 多執行緒載入影像
+
+  satellite:
+    batch_size: 512                   # Phase 1 GridLearner 的衛星影像批次大小 (與 Subgraph 不同)
+    num_workers: 8                    # 衛星影像載入的多執行緒數量
+
+# ==========================================
+# 5. 模型架構設定 (Model Configurations)
+# ==========================================
+model:
+  embed_dim: 144                     # 嵌入空間維度
+  llm_name: "bert-base-chinese"      # 用於 Phase 0 的文本特徵提取模型, 現在改這沒用, 自己去train.py改
+
+# ==========================================
+# 6. 訓練超參數 (Training Hyperparameters)
+# ==========================================
+training:
+  patience: 300                      # Early stopping 耐心值
+  
+  # 自定義 Loss (CustomMSELoss) 參數
+  loss:
+    z_threshold: 1.0
+    tail_weight: 5.0
+    lambda: 2.0                 # Total loss = Region loss + lambda * Cell loss
+    
+  # Phase 1: GridLearner (Self-Supervised)
+  grid_learner:
+    epochs: 1000
+    lr: 0.0001
+    batch_size: 8000                # Subgraph 節點批次大小 (與 DataLoader 不同)
+    
+  # Phase 3: Region Enricher (Downstream Task)
+  region_enricher:
+    epochs: 1000
+    lr: 0.0003
+    weight_decay: 5.0e-06
+    dropout_rate: 0.2                # Dropout rate for the downstream task model
+
+  # Optuna 自動調參設定
+  optuna:
+    n_trials: 50                     # 測試總次數
+    n_startup_trials: 5              # Pruner 暖身次數
+    n_warmup_steps: 150              # Pruner 暖身 Epochs
+    interval_steps: 10               # Pruner 檢查間隔
+    study_name: "2rings-new"  # Optuna Study 名稱 (用於儲存與識別)
+
+# ==========================================
+# 7. 流程控制 (Pipeline Execution Flags)
+# ==========================================
+pipeline:
+  refresh_data: false                # 對應 --refresh-data (強制重新執行預處理並覆寫 npz)
+  p1_skip: true                      # 對應 --p1-skip (跳過 Phase 1，直接讀取 phase1_embeddings_E.pt)
+  tune: false                        # 對應 --tune (啟用 Optuna 超參數微調)
