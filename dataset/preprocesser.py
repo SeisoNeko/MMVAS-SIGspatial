@@ -9,20 +9,32 @@ import gc
 import warnings
 from tqdm import tqdm
 
-# --- Configuration ---
 DATA_DIR = Path("./data/new")
 TARGET_CRS = 3826
 
-# 1. Land Use RGB to Category Mapping
 def load_land_use_mapping():
+    """Loads the land use RGB-to-category mapping.
+
+    Returns:
+        dict: A dictionary mapping RGB string codes to land use categories.
+    """
     mapping_df = pd.read_csv(DATA_DIR / "landUse" / "land_use_map.csv")
     map_dict = {}
     for _, row in mapping_df.iterrows():
         rgb_code = f"{row['R']}{row['G']}{row['B']}"
-        map_dict[rgb_code] = row['類別']
+        map_dict[rgb_code] = row['category']
     return map_dict
 
 def load_and_align(filepath, layer=None):
+    """Loads a spatial dataset and aligns it to the target Coordinate Reference System.
+
+    Args:
+        filepath (str or Path): The path to the spatial data file.
+        layer (str, optional): The specific layer to load for multi-layer files. Defaults to None.
+
+    Returns:
+        gpd.GeoDataFrame: The loaded and aligned spatial dataframe.
+    """
     if layer:
         gdf = gpd.read_file(filepath, layer=layer)
     else:
@@ -33,18 +45,22 @@ def load_and_align(filepath, layer=None):
     return gdf
 
 def build_feature_knn_graph(feature_matrix, k=6):
-    """
-    Builds a k-NN graph based on feature similarity without blowing up RAM.
-    Uses KD-Trees / Ball-Trees instead of a full N x N matrix.
+    """Builds a k-Nearest Neighbors graph based on feature cosine similarity.
+
+    Args:
+        feature_matrix (np.ndarray): The input feature matrix of shape (m, features).
+        k (int, optional): The number of nearest neighbors to compute. Defaults to 6.
+
+    Returns:
+        tuple: A tuple containing:
+            - edge_index (np.ndarray): The edge indices of shape (2, num_edges).
+            - edge_weights (np.ndarray): The computed cosine similarity weights.
     """
     m = feature_matrix.shape[0]
     
-    # We ask for k+1 neighbors because the closest neighbor to a node is always itself.
-    # metric='cosine' computes cosine distance (1 - cosine_similarity).
     nn = NearestNeighbors(n_neighbors=k+1, metric='cosine', n_jobs=-1)
     nn.fit(feature_matrix)
     
-    # distances and indices will be shape (m, k+1)
     distances, indices = nn.kneighbors(feature_matrix)
     
     source_nodes = []
@@ -52,10 +68,8 @@ def build_feature_knn_graph(feature_matrix, k=6):
     edge_weights = []
     
     for i in range(m):
-        # Skip the 0-th index because it is the node itself (distance = 0)
         for j in range(1, k+1):
             neighbor_idx = indices[i, j]
-            # Convert cosine distance back to cosine similarity
             similarity = 1.0 - distances[i, j] 
             
             source_nodes.append(i)
@@ -66,22 +80,25 @@ def build_feature_knn_graph(feature_matrix, k=6):
     edge_weights = np.array(edge_weights, dtype=np.float32)
     return edge_index, edge_weights
 
-# ==========================================
-# MODULAR PIPELINE FUNCTIONS
-# ==========================================
-
 def create_grid_region_mapping(cells_gdf, regions_gdf):
+    """Creates a mapping array linking grid cells to their enclosing geographic regions.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        regions_gdf (gpd.GeoDataFrame): The target macroscopic regions.
+
+    Returns:
+        np.ndarray: An array mapping grid node IDs to region indices.
+    """
     print("\n--- Creating Grid-to-Region Mapping ---")
     centroids = cells_gdf.copy()
     centroids['geometry'] = centroids.geometry.centroid
     
-    # Spatial join: Which region does the grid's centroid fall into?
     joined = gpd.sjoin(centroids[['node_id', 'geometry']], 
                        regions_gdf[['region_idx', 'geometry']], 
                        how='left', predicate='intersects')
     joined = joined.drop_duplicates(subset=['node_id'])
     
-    # Handle edge cases where centroid is slightly outside boundary borders
     missing_mask = joined['region_idx'].isna()
     if missing_mask.any():
         missing_nodes = joined.loc[missing_mask, 'node_id']
@@ -100,6 +117,19 @@ def create_grid_region_mapping(cells_gdf, regions_gdf):
     return mapping
 
 def process_farbac_pipeline(cells_gdf, m, k=6):
+    """Processes Floor Area Ratio and Building Coverage Ratio feature structures.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        m (int): The total number of grid cells.
+        k (int, optional): Number of neighbors for graph construction. Defaults to 6.
+
+    Returns:
+        tuple: A tuple containing:
+            - farbac_feat (np.ndarray): The extracted feature matrix.
+            - farbac_edge_index (np.ndarray): Edge indices for the feature graph.
+            - farbac_edge_weights (np.ndarray): Edge weights for the feature graph.
+    """
     print("\n--- Processing FAR/BAC ---")
     farbac_raw = load_and_align(DATA_DIR / "FARBAC" / "build_rate.gpkg")
     
@@ -120,17 +150,27 @@ def process_farbac_pipeline(cells_gdf, m, k=6):
     farbac_feat_df = pd.DataFrame(index=range(m)).join(farbac_agg).fillna(0)
     farbac_feat = farbac_feat_df[['VOLUMERATE', 'BUILDRATE']].to_numpy(dtype=np.float32)
     
-    # Build Graph
     farbac_edge_index, farbac_edge_weights = build_feature_knn_graph(farbac_feat, k=k)
 
-    # Free memory
     del farbac_raw, farbac_points, joined_farbac, farbac_agg, farbac_feat_df
     gc.collect()
     
     return farbac_feat, farbac_edge_index, farbac_edge_weights
 
-
 def process_lu_pipeline(cells_gdf, m, k=6):
+    """Processes land use intersection and area aggregation to extract tabular features.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        m (int): The total number of grid cells.
+        k (int, optional): Number of neighbors for graph construction. Defaults to 6.
+
+    Returns:
+        tuple: A tuple containing:
+            - lu_feat (np.ndarray): The normalized land use feature matrix.
+            - lu_edge_index (np.ndarray): Edge indices for the feature graph.
+            - lu_edge_weights (np.ndarray): Edge weights for the feature graph.
+    """
     print("\n--- Processing Land Use ---")
     lu_raw = load_and_align(DATA_DIR / "landUse" / "land_use_res_1.gpkg")
     LU_MAPPING = load_land_use_mapping()
@@ -150,7 +190,6 @@ def process_lu_pipeline(cells_gdf, m, k=6):
         if relevant_lu.empty:
             continue
 
-        # MEMORY FIX: Only simplify the small batch of geometries actively intersecting this chunk
         relevant_lu['geometry'] = relevant_lu['geometry'].simplify(tolerance=0.5, preserve_topology=True)
         
         intersected_chunk = gpd.overlay(cells_chunk, relevant_lu, how='intersection')
@@ -164,7 +203,6 @@ def process_lu_pipeline(cells_gdf, m, k=6):
         del cells_chunk, relevant_lu, intersected_chunk, chunk_agg
         gc.collect()
 
-    print("Aggregating final Land Use matrix...")
     if tabular_results:
         final_tabular = pd.concat(tabular_results, ignore_index=True)
         lu_pivot = final_tabular.pivot_table(index='node_id', columns='lu_category', values='area', aggfunc='sum', fill_value=0)
@@ -177,17 +215,29 @@ def process_lu_pipeline(cells_gdf, m, k=6):
     lu_feat_df = pd.DataFrame(index=range(m)).join(lu_pivot).fillna(0)
     lu_feat = lu_feat_df.to_numpy(dtype=np.float32)
 
-    # Build Graph
     lu_edge_index, lu_edge_weights = build_feature_knn_graph(lu_feat, k=k)
 
-    # Free massive raw memory
     del lu_raw, final_tabular, lu_pivot, lu_feat_df
     gc.collect()
     
     return lu_feat, lu_edge_index, lu_edge_weights
 
-
 def process_poi_pipeline(cells_gdf, m, min_occurrences=10, k=6):
+    """Aggregates Points of Interest (POI) data into grid-level features.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        m (int): The total number of grid cells.
+        min_occurrences (int, optional): Minimum frequency required to retain a POI category. Defaults to 10.
+        k (int, optional): Number of neighbors for graph construction. Defaults to 6.
+
+    Returns:
+        tuple: A tuple containing:
+            - poi_feat (np.ndarray): The POI frequency feature matrix.
+            - poi_edge_index (np.ndarray): Edge indices for the feature graph.
+            - poi_edge_weights (np.ndarray): Edge weights for the feature graph.
+            - poi_gdf (gpd.GeoDataFrame): The aligned POI geodataframe.
+    """
     print("\n--- Processing POI ---")
     poi_df = pd.read_csv(DATA_DIR / "POIs" / "tainan_pois.csv")
     
@@ -207,17 +257,26 @@ def process_poi_pipeline(cells_gdf, m, min_occurrences=10, k=6):
     poi_feat_df = pd.DataFrame(index=range(m)).join(poi_filtered).fillna(0)
     poi_feat = poi_feat_df.to_numpy(dtype=np.float32)
     
-    # Build Graph
     poi_edge_index, poi_edge_weights = build_feature_knn_graph(poi_feat, k=k)
 
-    # Free memory (Keep joined_poi_grid for prompts)
     del poi_df, poi_counts, poi_filtered, poi_feat_df
     gc.collect()
 
     return poi_feat, poi_edge_index, poi_edge_weights, poi_gdf
 
-
 def process_gn_pipeline(cells_gdf, m, k=6):
+    """Computes the physical geographic adjacency graph.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        m (int): The total number of grid cells.
+        k (int, optional): Number of geographic nearest neighbors. Defaults to 6.
+
+    Returns:
+        tuple: A tuple containing:
+            - gn_feat (np.ndarray): Matrix containing distance values to neighbors.
+            - gn_edge_index (np.ndarray): Edge indices for the geographic network.
+    """
     print(f"\n--- Processing Physical Neighbors (GN) (k={k}) ---")
     centroids = cells_gdf.geometry.centroid
     w_knn = KNN.from_dataframe(cells_gdf, k=k)
@@ -241,8 +300,16 @@ def process_gn_pipeline(cells_gdf, m, k=6):
     return gn_feat, gn_edge_index
 
 def generate_region_text_prompts(regions_gdf, poi_gdf):
+    """Generates natural language prompts representing urban environments at a macroscopic scale.
+
+    Args:
+        regions_gdf (gpd.GeoDataFrame): The macro-level geographic regions.
+        poi_gdf (gpd.GeoDataFrame): The points of interest.
+
+    Returns:
+        list: A list of formatted string prompts.
+    """
     print("\n--- Generating Region-Level Text Prompts ---")
-    # Join POIs to Regions
     joined_poi_region = gpd.sjoin(poi_gdf, regions_gdf[['region_idx', 'geometry']], how='inner', predicate='intersects')
     poi_counts = pd.crosstab(joined_poi_region['region_idx'], joined_poi_region['unified_type']) if not joined_poi_region.empty else pd.DataFrame()
     centroids_4326 = regions_gdf.geometry.centroid.to_crs(epsg=4326)
@@ -252,7 +319,6 @@ def generate_region_text_prompts(regions_gdf, poi_gdf):
         r_idx = row['region_idx']
         lat, lng = centroids_4326.iloc[i].y, centroids_4326.iloc[i].x
         
-        # Adjust property access depending on your region shapefile attributes
         village_name = row.get('VILLNAME', f'Region {r_idx}')
         town_name = row.get('TOWNNAME', '')
         county = row.get('COUNTYNAME', 'Tainan City')
@@ -279,13 +345,21 @@ def generate_region_text_prompts(regions_gdf, poi_gdf):
     return raw_prompts
 
 def generate_grid_text_prompts(cells_gdf, regions_gdf, poi_gdf):
+    """Generates natural language prompts representing urban environments at a microscopic grid scale.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        regions_gdf (gpd.GeoDataFrame): The encompassing regions for addressing context.
+        poi_gdf (gpd.GeoDataFrame): The points of interest.
+
+    Returns:
+        list: A list of formatted string prompts representing individual grids.
+    """
     print("\n--- Generating Grid-Level Text Prompts ---")
     
-    # 1. Join POIs strictly to the 100m Grids
     joined_poi_grid = gpd.sjoin(poi_gdf, cells_gdf[['node_id', 'geometry']], how='inner', predicate='intersects')
     poi_counts = pd.crosstab(joined_poi_grid['node_id'], joined_poi_grid['unified_type']) if not joined_poi_grid.empty else pd.DataFrame()
     
-    # 2. Get Village Names for Address Context (Using centroids for speed)
     centroids = cells_gdf.copy()
     centroids['geometry'] = centroids.geometry.centroid
     joined_grid_region = gpd.sjoin(
@@ -294,43 +368,33 @@ def generate_grid_text_prompts(cells_gdf, regions_gdf, poi_gdf):
         how='left', 
         predicate='intersects'
     )
-    # Handle duplicates if a centroid exactly hits a village boundary
     joined_grid_region = joined_grid_region.drop_duplicates(subset=['node_id']).set_index('node_id')
     
-    # Convert to GPS coordinates for the text prompt
     centroids_4326 = cells_gdf.geometry.centroid.to_crs(epsg=4326)
 
     raw_prompts = []
-    # Using tqdm because iterating over hundreds of thousands of grids takes time
     for i, row in tqdm(cells_gdf.iterrows(), total=len(cells_gdf), desc="Generating Grid Prompts"):
         node_id = row['node_id']
         lat, lng = centroids_4326.iloc[i].y, centroids_4326.iloc[i].x
         
-        # Build the Address String
         if node_id in joined_grid_region.index:
             r_row = joined_grid_region.loc[node_id]
             address = ", ".join([str(p) for p in [r_row.get('VILLNAME', ''), r_row.get('TOWNNAME', ''), r_row.get('COUNTYNAME', 'Tainan City'), "Taiwan"] if pd.notna(p) and p != ''])
         else:
-            warnings.warn(f"Grid node_id {node_id} has no associated region. Defaulting to generic address."
-                          f"It's raw row is {row} and it may be located at ({lat:.5f}, {lng:.5f})."
-                          )
             address = "Tainan City, Taiwan"
             
-        # Count only the POIs inside this specific 100m grid
         poi_text_parts = []
         total_pois = 0
         if node_id in poi_counts.index:
             grid_pois = poi_counts.loc[node_id]
             total_pois = grid_pois.sum()
             if total_pois > 0:
-                # Sort to put the most prominent POIs first
                 sorted_pois = grid_pois[grid_pois > 0].sort_values(ascending=False)
                 for category, count in sorted_pois.items():
                     poi_text_parts.append(f"{int(count)} {category}")
                     
         poi_string = ", ".join(poi_text_parts) if total_pois > 0 else "0 POIs"
         
-        # The Final Micro-Grid Prompt
         prompt = (f"Please infer the urban environment of this 100m micro-grid:\n"
                   f"The grid is located in {address}.\n\n"
                   f"Centroid Coordinates: ({lat:.5f}, {lng:.5f})\n\n"
@@ -341,10 +405,19 @@ def generate_grid_text_prompts(cells_gdf, regions_gdf, poi_gdf):
     return raw_prompts
 
 def process_tax_pipeline_100m_imputed(cells_gdf, regions_gdf, grid_mapping, seq_len=3, raw_tax_dim=3):
-    """
-    Processes the pre-imputed 100m hex-grid tax data.
-    Aligns the data with the spatial grid, extracts micro-level labels, 
-    and builds macro-level temporal sequences for the RegionEnricher.
+    """Extracts historical sequences and spatial grid labels from imputed assessment data.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids.
+        regions_gdf (gpd.GeoDataFrame): The macro-level geographic regions.
+        grid_mapping (np.ndarray): The mapping array linking grids to regions.
+        seq_len (int, optional): The number of time steps in the history sequence. Defaults to 3.
+        raw_tax_dim (int, optional): The dimensionality of the historical features. Defaults to 3.
+
+    Returns:
+        tuple: A tuple containing:
+            - tax_sequences (torch.Tensor): The temporal sequences per region.
+            - grid_labels (torch.Tensor): The regression target variables for each grid.
     """
     print("\n--- Processing Imputed Tax Data for 100m Hex Grid ---")
     imputed_tax_csv_path = DATA_DIR / "tax" / "100m_hex_tax_imputed.csv"
@@ -357,72 +430,74 @@ def process_tax_pipeline_100m_imputed(cells_gdf, regions_gdf, grid_mapping, seq_
         if col in cells_with_tax.columns:
             cells_with_tax[col] = cells_with_tax[col].fillna(cells_with_tax[col].median())
 
-    grid_labels = cells_with_tax['avg_111地段率'].values
+    grid_labels = cells_with_tax['avg_111_land_rate'].values
     grid_labels = torch.tensor(grid_labels, dtype=torch.float32)
 
     cells_with_tax['region_id'] = grid_mapping
     region_agg = cells_with_tax.groupby('region_id').mean(numeric_only=True)
 
     num_regions = len(regions_gdf)
-    seq_len = seq_len      # Years 105, 108, 111
-    raw_tax_dim = raw_tax_dim  # Dimensions: [Rate, Value, weighted_volumerate_avg]
 
     tax_sequences = torch.zeros((num_regions, seq_len, raw_tax_dim), dtype=torch.float32)
     city_mean_row = cells_with_tax.mean(numeric_only=True)
 
     for r_idx in range(num_regions):
-        # Fetch the region's historical average, or fallback to city average if the region is empty
         if r_idx in region_agg.index:
             row = region_agg.loc[r_idx]
         else:
             row = city_mean_row 
 
-        # Time step 0: Year 105
-        tax_sequences[r_idx, 0, 0] = row['avg_105地段率']
-        tax_sequences[r_idx, 0, 1] = row['avg_105現值']
+        tax_sequences[r_idx, 0, 0] = row['avg_105_land_rate']
+        tax_sequences[r_idx, 0, 1] = row['avg_105_present_value']
         tax_sequences[r_idx, 0, 2] = row['weighted_volumerate_avg']
         
-        # Time step 1: Year 108
-        tax_sequences[r_idx, 1, 0] = row['avg_108地段率']
-        tax_sequences[r_idx, 1, 1] = row['avg_108現值']
+        tax_sequences[r_idx, 1, 0] = row['avg_108_land_rate']
+        tax_sequences[r_idx, 1, 1] = row['avg_108_present_value']
         tax_sequences[r_idx, 1, 2] = row['weighted_volumerate_avg']
         
-        # Time step 2: Year 111
-        tax_sequences[r_idx, 2, 0] = row['avg_111地段率']
-        tax_sequences[r_idx, 2, 1] = row['avg_111現值']
+        tax_sequences[r_idx, 2, 0] = row['avg_111_land_rate']
+        tax_sequences[r_idx, 2, 1] = row['avg_111_present_value']
         tax_sequences[r_idx, 2, 2] = row['weighted_volumerate_avg']
 
     return tax_sequences, grid_labels
 
 def export_GPKG(cells_gdf, grid_labels, grid_to_region_mapping, farbac_feat):
-    print("\n--- Exporting QGIS Verification Files ---")
+    """Exports processed features alongside geographic primitives for external verification.
+
+    Args:
+        cells_gdf (gpd.GeoDataFrame): The spatial grids geometries.
+        grid_labels (torch.Tensor): Processed labels corresponding to grids.
+        grid_to_region_mapping (np.ndarray): The mapping between grids and regions.
+        farbac_feat (np.ndarray): The extracted FAR/BAC features.
+    """
+    print("\n--- Exporting Verification Files ---")
     
-    # 1. Create a copy of the pristine geographic grid
     verify_gdf = cells_gdf[['node_id', 'id', 'geometry']].copy()
     
-    # 2. Attach the PyTorch matrix data back to the GeoDataFrame
-    # Because we verified the row counts and sorting, row 'i' in the tensor 
-    # perfectly matches row 'i' in verify_gdf.
     verify_gdf['target_111_rate'] = grid_labels.numpy()
     verify_gdf['region_idx'] = grid_to_region_mapping
-    
-    # Attach a few obvious features so you can physically verify the locations
-    # (e.g., Volume Rate is column 0 in farbac_feat)
     verify_gdf['farbac_volume_rate'] = farbac_feat[:, 0]
     
-    # 3. Export to CSV (with WKT geometry string)
     OUTPUT_DIR = Path("./dataset")
     csv_out_path = OUTPUT_DIR / "qgis_verify_dataset.csv"
     verify_gdf.to_csv(csv_out_path, index=False)
-    print(f"Saved Verification CSV to: {csv_out_path}")
     
-    # 4. Export to GeoPackage (Highly recommended for QGIS)
     gpkg_out_path = OUTPUT_DIR / "qgis_verify_dataset.gpkg"
     verify_gdf.to_file(gpkg_out_path, driver="GPKG")
-    print(f"Saved Verification GPKG to: {gpkg_out_path}")
 
 def main(grid_type: str = "100m", knn_k: int = 6, poi_min_occurrences: int = 10, tax_seq_len: int = 3, tax_raw_dim: int = 3):
-    print("Loading Base Grid & Regions...")
+    """Main execution pipeline for generating all spatial graphs and aligned feature matrices.
+
+    Args:
+        grid_type (str, optional): The resolution scale of the base grid. Defaults to "100m".
+        knn_k (int, optional): K-value used for generating all nearest neighbor graphs. Defaults to 6.
+        poi_min_occurrences (int, optional): Filter threshold for POI categories. Defaults to 10.
+        tax_seq_len (int, optional): Expected sequence length for historical data. Defaults to 3.
+        tax_raw_dim (int, optional): Number of distinct historical features per time step. Defaults to 3.
+
+    Returns:
+        dict: A compiled dictionary of all normalized tensors, mappings, and edge indices.
+    """
     if grid_type == "1km":
         cells_gdf = load_and_align(DATA_DIR / "grid" / "grid.gpkg", layer="grid")
     elif grid_type == "100m":
@@ -453,8 +528,6 @@ def main(grid_type: str = "100m", knn_k: int = 6, poi_min_occurrences: int = 10,
     
     gn_feat, gn_edge_index = process_gn_pipeline(cells_gdf, m, k=knn_k)
     
-
-    # Construct final dictionary
     dataset = {
         "grid_to_region_mapping": grid_to_region_mapping,
         "grid_labels": grid_labels,
@@ -466,26 +539,13 @@ def main(grid_type: str = "100m", knn_k: int = 6, poi_min_occurrences: int = 10,
         "raw_tax_sequences": raw_tax_sequences
     }
 
-    print("\n" + "="*50)
-    print("MATRIX ROW ALIGNMENT SANITY CHECK")
-    print("="*50)
-    print(f"Base Geography Cells (m):  {m}")
-    print(f"Tax Labels Target Matrix:  {grid_labels.shape[0]}")
-    print(f"Region Mapping Array:      {grid_to_region_mapping.shape[0]}")
-    print(f"POI Feature Matrix:        {poi_feat.shape[0]}")
-    print(f"Land Use Feature Matrix:   {lu_feat.shape[0]}")
-    print(f"FAR/BAC Feature Matrix:    {farbac_feat.shape[0]}")
-    print(f"Geo-Neighbor Matrix:       {gn_feat.shape[0]}")
-    print("="*50)
-    
     assert all(x == m for x in [
         grid_labels.shape[0], grid_to_region_mapping.shape[0], 
         poi_feat.shape[0], lu_feat.shape[0], farbac_feat.shape[0], gn_feat.shape[0]
-    ]), "CRITICAL ERROR: A pipeline module shuffled the row alignment!"
+    ])
 
     export_GPKG(cells_gdf, grid_labels, grid_to_region_mapping, farbac_feat)
 
-    print("\nDataset compiled successfully!")
     return dataset
 
 if __name__ == "__main__":
@@ -493,4 +553,3 @@ if __name__ == "__main__":
     OUTPUT_DIR = Path("./dataset")
     OUTPUT_DIR.mkdir(exist_ok=True)
     np.savez_compressed(OUTPUT_DIR / "processed_dataset.npz", **model_dataset)
-    print(f"Saved to {OUTPUT_DIR / 'processed_dataset.npz'}")

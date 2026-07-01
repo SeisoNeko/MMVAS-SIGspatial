@@ -3,15 +3,24 @@ import pandas as pd
 import geopandas as gpd
 import os
 
-# path to directories
 DATA_DIR = "./data/old/POIs"
-FIRST_POI_DATA_DIR = DATA_DIR + "/一期poi資料"
-GOOGLE_POI_DATA_DIR = DATA_DIR + "/google map"
+FIRST_POI_DATA_DIR = DATA_DIR + "/first_phase_poi_data"
+GOOGLE_POI_DATA_DIR = DATA_DIR + "/google_map"
 OPENSTREETMAP_POI_DATA_DIR = DATA_DIR + "/OSM"
 
 OUTPUT_CSV = "./dataset/processed_poi_data.csv"
 
 def load_first_poi_data():
+    """Loads and processes the first phase Point of Interest (POI) dataset.
+
+    Iterates through the designated directory, reads CSV files containing 
+    POI coordinates, standardizes column names, and extracts categorization 
+    metadata from the filenames.
+
+    Returns:
+        pd.DataFrame: A concatenated dataframe containing latitude, longitude, 
+            POI type, and category for all successfully processed records.
+    """
     print("Loading and processing first POI dataset...")
     df_list = [] 
     for filename in os.listdir(FIRST_POI_DATA_DIR):
@@ -28,22 +37,20 @@ def load_first_poi_data():
             except UnicodeDecodeError:
                 fileContent = pd.read_csv(filepath, encoding="Big5")
             except Exception as e:
-                # 停車場先不管
                 print(f"Error reading {filename}: {e}")
                 continue
 
             cols_to_keep = ["lat", "lng"]
             if "xcoord" in fileContent.columns and "ycoord" in fileContent.columns:
-                # rename to standard names
                 fileContent = fileContent.rename(columns={"xcoord": "lng", "ycoord": "lat"})
                 cols_to_keep = ["lat", "lng"]
 
             try:
-                temp_df = fileContent[cols_to_keep].copy().replace('"', '').replace("'", "")    # only keep digit
+                temp_df = fileContent[cols_to_keep].copy().replace('"', '').replace("'", "")
             except KeyError:
                 print(f"Error: Required columns not found in {filename}")
                 continue
-            #clean empty rows
+            
             temp_df = temp_df.dropna(subset=cols_to_keep)
 
             temp_df["poi_type"] = poi_type
@@ -60,6 +67,15 @@ def load_first_poi_data():
     return final_poi_df
 
 def load_google_poi_data():
+    """Loads and processes the Google Maps POI dataset.
+
+    Reads coordinate data from CSV files and infers the POI type based 
+    on the filename structure. 
+
+    Returns:
+        pd.DataFrame: A concatenated dataframe containing the compiled Google 
+            Maps POI records.
+    """
     print("Loading and processing Google Maps POI dataset...")
     df_list = []
     for filename in os.listdir(GOOGLE_POI_DATA_DIR):
@@ -82,6 +98,7 @@ def load_google_poi_data():
             except KeyError:
                 print(f"Error: Required columns not found in {filename}")
                 continue
+                
             temp_df["poi_type"] = poitype
             temp_df["category"] = ''
             df_list.append(temp_df)
@@ -93,7 +110,15 @@ def load_google_poi_data():
     return pd.concat(df_list, ignore_index=True)
 
 def load_osm_poi_data():
-    # 先不使用
+    """Loads and processes the OpenStreetMap (OSM) POI dataset.
+
+    Parses GeoJSON files, aligns the Coordinate Reference System (CRS) to EPSG:3826, 
+    and extracts centroid coordinates for bounding geometries.
+
+    Returns:
+        pd.DataFrame: A concatenated dataframe containing the compiled OSM 
+            POI records.
+    """
     print("Loading and processing OpenStreetMap POI dataset...")
     df_list = []
     
@@ -108,8 +133,6 @@ def load_osm_poi_data():
             if df.crs is None or df.crs.to_epsg() != 3826:
                 df = df.to_crs(epsg=3826)
 
-
-            # 如果geometry.type是Point，直接使用座標；如果是Polygon或MultiPolygon，使用centroid
             if df.geometry.type == 'Point':
                 centroids = df.geometry
             else:
@@ -121,9 +144,9 @@ def load_osm_poi_data():
                 poi_names = "Unknown"
 
             temp_df = pd.DataFrame({
-                "lat": centroids.x,          # Projected X coordinate (meters)
-                "lng": centroids.y,          # Projected Y coordinate (meters)
-                "poi_type": poi_names,  # Use 'name' as poi_type if available, otherwise "Unknown"
+                "lat": centroids.x,          
+                "lng": centroids.y,          
+                "poi_type": poi_names,  
                 "category": ''
             })
             
@@ -137,15 +160,17 @@ def load_osm_poi_data():
 
 
 def main():
-    # Load all POI datasets
+    """Executes the complete POI data preprocessing pipeline.
+
+    Loads diverse POI datasets, concatenates them into a unified structure, 
+    and exports the final dataset to a designated CSV file.
+    """
     first_poi_df = load_first_poi_data()
     google_poi_df = load_google_poi_data()
     # osm_poi_df = load_osm_poi_data()
 
-    # Concatenate all POI dataframes
     processed_poi_df = pd.concat([first_poi_df, google_poi_df], ignore_index=True)
 
-    # Save the processed data to a CSV file
     processed_poi_df.to_csv(OUTPUT_CSV, index=False)
     print(f"Processed POI data saved to {OUTPUT_CSV}")
 

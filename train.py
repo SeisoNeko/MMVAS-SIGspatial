@@ -27,6 +27,15 @@ from dataset.mmurgdataset import MMURGDataContainer, collate_fn
 import gc
 
 def load_config(config_path="config.yaml"):
+    """Loads the YAML configuration file.
+
+    Args:
+        config_path (str, optional): The file path to the YAML configuration. 
+            Defaults to "config.yaml".
+
+    Returns:
+        dict: A dictionary containing the parsed configuration parameters.
+    """
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config
@@ -45,6 +54,11 @@ logging.basicConfig(
 )
 
 def set_seed(seed):
+    """Sets the random seed for reproducibility across standard libraries and PyTorch.
+
+    Args:
+        seed (int): The random seed value to enforce deterministic operations.
+    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -59,7 +73,17 @@ def set_seed(seed):
     torch.use_deterministic_algorithms(True, warn_only=True)
 
 def get_subgraph_batch(node_idx, edge_index, edge_attr=None, num_nodes=None):
-    """Helper function to extract a subgraph for memory-safe GNN training."""
+    """Extracts a localized subgraph for memory-efficient GNN training.
+
+    Args:
+        node_idx (torch.Tensor): Indices of the central nodes forming the subgraph.
+        edge_index (torch.Tensor): The global edge connectivity matrix.
+        edge_attr (torch.Tensor, optional): Global edge attributes. Defaults to None.
+        num_nodes (int, optional): The total number of nodes in the global graph. Defaults to None.
+
+    Returns:
+        tuple: A tuple containing the corresponding sub_edge_index and sub_edge_attr tensors.
+    """
     sub_edge_index, sub_edge_attr = subgraph(
         node_idx, edge_index, edge_attr, relabel_nodes=True, num_nodes=num_nodes
     )
@@ -67,7 +91,14 @@ def get_subgraph_batch(node_idx, edge_index, edge_attr=None, num_nodes=None):
 
 
 def save_training_curves(train_losses, val_losses, output_path, title):
-    """Save train/validation loss curves to an image file."""
+    """Saves the training and validation loss curves to a plot image file.
+
+    Args:
+        train_losses (list of float): The sequence of recorded training losses.
+        val_losses (list of float): The sequence of recorded validation losses.
+        output_path (str): The destination file path for the output plot.
+        title (str): The display title of the plot.
+    """
     if not train_losses and not val_losses:
         return
 
@@ -87,32 +118,33 @@ def save_training_curves(train_losses, val_losses, output_path, title):
     plt.close()
 
 def train():
-    # Ensure weights directory exists
+    """Executes the end-to-end multi-phase training pipeline.
+
+    Orchestrates data loading, feature extraction (Phase 0), self-supervised grid 
+    embedding learning (Phase 1), region aggregation (Phase 2), supervised task training 
+    and Optuna hyperparameter tuning (Phase 3), concluding with evaluation (Phase 4).
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    # 1. Hardware Configuration
     device = torch.device(config["global"]["device"] if torch.cuda.is_available() else "cpu")
-    logging.info(f"Training on device: {device} | Grid Type: 100m")
+    logging.info(f"Training on device: {device} | Grid Type: {config['dataset']['grid_type']}")
     
-    # 2. Strict Hyperparameters based on MMURG experimental settings
     embed_dim = config["model"]["embed_dim"]
     
-    # GridLearner Hyperparameters
     grid_lr = config["training"]["grid_learner"]["lr"]
     grid_epochs = config["training"]["grid_learner"]["epochs"]
     grid_batch_size = config["training"]["grid_learner"]["batch_size"]
     
-    # Region Enricher Hyperparameters
     region_lr = config["training"]["region_enricher"]["lr"]
     weight_decay = config["training"]["region_enricher"]["weight_decay"]
     lambda_weight = config["training"]["loss"]["lambda"]
     region_epochs = config["training"]["region_enricher"]["epochs"]
     patience = config["training"]["patience"]
     dropout_rate = config["training"]["region_enricher"]["dropout_rate"]
+    
     set_seed(config["global"]["seed"])
     
-    # log all parameters
     logging.info("\n--- Hyperparameters ---")
     logging.info(f"GridLearner Learning Rate: {grid_lr}")
     logging.info(f"GridLearner Epochs: {grid_epochs}")
@@ -124,9 +156,8 @@ def train():
     logging.info(f"Random Seed: {config['global']['seed']}")
     logging.info(f"Dropout Rate: {dropout_rate}")
 
-    # 3. Load Preprocessed Datasets
     data = MMURGDataContainer(
-        config = config
+        config=config
     )
     m_cells = data.cell_dataset.num_cells
     
@@ -137,7 +168,6 @@ def train():
     
     logging.info(f"\nPhase 3 Data Split: {train_size} Train | {val_size} Val | {test_size} Test")
     
-    # Fix the generator seed for reproducible splits across runs
     generator = torch.Generator().manual_seed(config["global"]["seed"])
     train_dataset, val_dataset, test_dataset = random_split(
         data.region_dataset, [train_size, val_size, test_size], generator=generator
@@ -147,7 +177,6 @@ def train():
     val_loader = DataLoader(val_dataset, batch_size=config["dataloader"]["batch_size"], shuffle=False, num_workers=config["dataloader"]["num_workers"], collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=config["dataloader"]["batch_size"], shuffle=False, num_workers=config["dataloader"]["num_workers"], collate_fn=collate_fn)
     
-    # 4. Initialize the Models
     input_dims = {
         'poi': data.cell_dataset.poi_feat.shape[1],
         'land_use': data.cell_dataset.lu_feat.shape[1],
@@ -156,33 +185,27 @@ def train():
     }
     
     grid_learner = GridLearner(input_dims=input_dims, embed_dim=embed_dim).to(device)
-    ada_region_gen = AdaRegionGen() # Deterministic, no device placement needed
+    ada_region_gen = AdaRegionGen()
     task_model = DownstreamTaskModel(embed_dim=embed_dim, dropout_rate=dropout_rate).to(device)
     
-    # 5. Optimizers
     grid_optimizer = optim.Adam(grid_learner.parameters(), lr=grid_lr)
     task_optimizer = optim.Adam(task_model.parameters(), lr=region_lr, weight_decay=weight_decay)
 
-    # 6. Loss Functions
     similarity_criterion = FusionSimilarityLoss().to(device)
     region_criterion = nn.MSELoss().to(device)
-    grid_criterion = CustomMSELoss(z_threshold = config["training"]["loss"]["z_threshold"], tail_weight=config["training"]["loss"]["tail_weight"]).to(device)
+    grid_criterion = CustomMSELoss(z_threshold=config["training"]["loss"]["z_threshold"], tail_weight=config["training"]["loss"]["tail_weight"]).to(device)
 
-    # -------------------------------------------------------------------------
-    # PHASE 0: Offline Text & SVI Extraction (Preventing Memory Bottlenecks)
-    # -------------------------------------------------------------------------
     logging.info("\n--- Phase 0: Extracting LLM Embeddings ---")
 
     sat_cache_path = os.path.join(CACHE_DIR, config["paths"]["sat_cache_name"])
     text_cache_path = os.path.join(CACHE_DIR, config["paths"]["text_cache_name"])
 
-    # Text Extraction
     if os.path.exists(text_cache_path) and not config["pipeline"]["refresh_data"]:
-        logging.info("Loading cached LLM Text Embeddings...")
+        logging.info("Loading cached language model text embeddings...")
         H_t = torch.load(text_cache_path, map_location=device, weights_only=True)
     else:
-        logging.info("Extracting LLM Text Embeddings (This will run once)...")
-        llm = AutoModel.from_pretrained("bert-base-chinese").to(device).eval()
+        logging.info("Extracting language model text embeddings...")
+        llm = AutoModel.from_pretrained(config["model"]["llm_name"]).to(device).eval()
         
         all_input_ids = data.region_dataset.text_input_ids.to(device) 
         all_attention_mask = data.region_dataset.text_attention_mask.to(device)
@@ -198,12 +221,11 @@ def train():
     grid_to_region_mapping = data.grid_to_region_mapping.to(device) 
     text_emb_mapped = H_t[grid_to_region_mapping] 
 
-    # Satellite Extraction
     if os.path.exists(sat_cache_path) and not config["pipeline"]["refresh_data"]:
-        logging.info("Loading cached ResNet50 Satellite Features...")
+        logging.info("Loading cached satellite features...")
         full_sat_features = torch.load(sat_cache_path, map_location=device, weights_only=True)
     else:
-        logging.info(f"Extracting {m_cells} Satellite Image Features (This will run once)...")
+        logging.info(f"Extracting {m_cells} satellite image features...")
         seq_cell_loader = DataLoader(data.cell_dataset, batch_size=config["dataloader"]["satellite"]["batch_size"], shuffle=False, num_workers=config["dataloader"]["satellite"]["num_workers"]) 
         resnet = models.resnet50(weights=ResNet50_Weights.DEFAULT).to(device)
         resnet.fc = nn.Identity()
@@ -224,10 +246,7 @@ def train():
         
     full_sat_features = full_sat_features.to(device)
 
-    # =====================================================================
-    # PHASE 1: Train GridLearner (Self-Supervised Multi-Task)
-    # =====================================================================
-    logging.info("\n--- Starting Phase 1: GridLearner Training ---")
+    logging.info("\n--- Phase 1: GridLearner Training ---")
     grid_learner.train()
     
     poi_feat = data.cell_dataset.poi_feat.to(device)
@@ -246,10 +265,10 @@ def train():
     farbac_edge_weights = data.farbac_edge_weights.to(device)
     
     if config["pipeline"]["p1_skip"]:
-        logging.info("\n--- [Phase 1 Skipped] Loading pre-trained E ---")
+        logging.info("Phase 1 Skipped. Loading pre-trained target embeddings.")
         final_E = torch.load(f'{OUTPUT_DIR}/phase1_embeddings_E.pt', map_location=device, weights_only=True)
     else:
-        logging.info("\n--- Starting Phase 1: Subgraph Batched GridLearner ---")
+        logging.info("Executing Subgraph Batched GridLearner...")
         grid_learner.train()
 
         for epoch in range(grid_epochs):
@@ -262,11 +281,9 @@ def train():
                 grid_optimizer.zero_grad()
                 b_nodes = permuted_nodes[i:i+grid_batch_size]
                 
-                # 1. Slice Node Features
                 b_poi_f, b_lu_f, b_gn_f, b_farbac_f = poi_feat[b_nodes], lu_feat[b_nodes], gn_feat[b_nodes], farbac_feat[b_nodes]
                 b_sat, b_text = full_sat_features[b_nodes], text_emb_mapped[b_nodes]
                 
-                # 2. Extract Subgraphs mapping edges only to the current batch of nodes
                 b_poi_e, b_poi_w = get_subgraph_batch(b_nodes, poi_edge_index, poi_edge_weights, num_nodes=m_cells)
                 b_lu_e, b_lu_w = get_subgraph_batch(b_nodes, lu_edge_index, lu_edge_weights, num_nodes=m_cells)
                 b_gn_e, _ = get_subgraph_batch(b_nodes, gn_edge_index, num_nodes=m_cells)
@@ -299,7 +316,7 @@ def train():
                 logging.info(f"Early stopping triggered at epoch {epoch+1} with best loss {best_loss:.4f}")
                 break
                 
-        logging.info("Generating full-city Grid Embeddings (Chunked)...")
+        logging.info("Generating global grid embeddings...")
         grid_learner.eval()
         final_E = torch.zeros((m_cells, embed_dim), device=device)
         with torch.no_grad():
@@ -329,12 +346,8 @@ def train():
         del grid_optimizer
         gc.collect()
         torch.cuda.empty_cache()
-        logging.info("Phase 1 GPU VRAM successfully released.")
         
-    # =====================================================================
-    # PHASE 2: AdaRegionGen (Deterministic Geometric Projection)
-    # =====================================================================
-    logging.info("\n--- Starting Phase 2: Adaptive Region Generation ---")
+    logging.info("\n--- Phase 2: Adaptive Region Generation ---")
     H = ada_region_gen.forward(
         regions_gdf=data.regions_gdf, 
         cells_gdf=data.cells_gdf, 
@@ -343,29 +356,23 @@ def train():
     H = H.to(device)
     logging.info(f"Generated Region Embedding Matrix H of shape: {H.shape}")
     
-    # =====================================================================
-    # PHASE 3: Train Region Enricher (Supervised Downstream Task)
-    # =====================================================================
     if config["pipeline"]["tune"]:
-        logging.info("\n--- Starting Optuna Hyperparameter Tuning for Phase 3 ---")
+        logging.info("\n--- Optuna Hyperparameter Tuning for Phase 3 ---")
         
         def objective(trial):
-            # 1. Suggest Hyperparameters
             trial_lr = trial.suggest_float("region_lr", 1e-5, 1e-2, log=True)
             trial_weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
             trial_lambda = trial.suggest_float("lambda", 0.01, 100.0, log=True)
             trial_dropout_rate = trial.suggest_float("dropout_rate", 1e-5, 0.5, log=True)
             
-            # 2. Initialize a fresh model and optimizer for this trial
             trial_model = DownstreamTaskModel(embed_dim=embed_dim, dropout_rate=trial_dropout_rate).to(device)
             trial_optimizer = optim.Adam(trial_model.parameters(), lr=trial_lr, weight_decay=trial_weight_decay)
-            trial_grid_criterion = CustomMSELoss(z_threshold = config["training"]["loss"]["z_threshold"], tail_weight=config["training"]["loss"]["tail_weight"]).to(device)
+            trial_grid_criterion = CustomMSELoss(z_threshold=config["training"]["loss"]["z_threshold"], tail_weight=config["training"]["loss"]["tail_weight"]).to(device)
             
             best_val_loss = float('inf')
             epochs_no_improve = 0
             
             for epoch in range(region_epochs):
-                # --- TRAINING PASS ---
                 trial_model.train()
                 for batch in train_loader:
                     trial_optimizer.zero_grad()
@@ -406,7 +413,6 @@ def train():
                     torch.nn.utils.clip_grad_norm_(trial_model.parameters(), max_norm=1.0)
                     trial_optimizer.step()
                 
-                # --- VALIDATION PASS ---
                 trial_model.eval()
                 val_loss = 0.0
                 with torch.no_grad():
@@ -445,17 +451,14 @@ def train():
                         
                 avg_val_loss = val_loss / len(val_loader)
                 
-                # Update best loss and early stopping
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1
                 
-                # Report intermediate values to Optuna
                 trial.report(avg_val_loss, epoch)
                 
-                # Handle pruning based on the intermediate value
                 if trial.should_prune():
                     raise optuna.exceptions.TrialPruned()
                     
@@ -464,7 +467,6 @@ def train():
                     
             return best_val_loss
 
-        # Create and run the Optuna study
         study = optuna.create_study(direction="minimize", 
                                     study_name=config["training"]["optuna"]["study_name"],
                                     storage="sqlite:///tuning_history.db",
@@ -474,10 +476,9 @@ def train():
                                         n_warmup_steps=config["training"]["optuna"]["n_warmup_steps"],
                                         interval_steps=config["training"]["optuna"]["interval_steps"]
                                     ))
-        logging.info("Starting optimization. Press Ctrl+C to stop early and keep best results.")
+        logging.info("Starting optimization. Press Ctrl+C to interrupt.")
         
         try:
-            # You can adjust n_trials to however many combinations you want to test
             study.optimize(objective, n_trials=config["training"]["optuna"]["n_trials"], timeout=None) 
         except KeyboardInterrupt:
             logging.info("Optimization interrupted by user. Returning best trial so far.")
@@ -497,10 +498,10 @@ def train():
         for key, value in trial.params.items():
             logging.info(f"    {key}: {value}")
             
-        logging.info("Optuna tuning complete. Please update your command-line arguments with the best parameters and re-run without --tune.")
-        return # Exit after tuning, so we don't accidentally run Phase 4 with an untrained model
+        logging.info("Optuna tuning complete. Please update configuration arguments and disable tuning flag.")
+        return 
     else:
-        logging.info("\n--- Starting Phase 3: Region Enricher Task Training ---")
+        logging.info("\n--- Phase 3: Region Enricher Task Training ---")
         
         best_val_loss = float('inf')
         best_model_path = f'{OUTPUT_DIR}/best_task_model.pth'
@@ -560,7 +561,6 @@ def train():
             avg_train_loss = train_loss / len(train_loader)
             train_loss_history.append(avg_train_loss)
             
-            # --- VALIDATION PASS ---
             task_model.eval()
             val_loss = 0.0
             
@@ -604,7 +604,6 @@ def train():
             avg_val_loss = val_loss / len(val_loader)
             val_loss_history.append(avg_val_loss)
             
-            # --- CHECKPOINT SAVING ---
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 torch.save(task_model.state_dict(), best_model_path)
@@ -632,19 +631,14 @@ def train():
 
         logging.info(f"\nPhase 3 Training Complete. Best Validation MSE: {best_val_loss:.4f}")
 
-        # =====================================================================
-        # PHASE 4: Final Test Evaluation
-        # =====================================================================
-        logging.info("\n--- Starting Phase 4: Final Test Evaluation ---")
+        logging.info("\n--- Phase 4: Final Test Evaluation ---")
         
-        # Load the best weights we saved during validation
         task_model.load_state_dict(torch.load(best_model_path, map_location=device))
         task_model.eval()
 
         label_mean = data.region_dataset.label_mean.to(device)
         label_std = data.region_dataset.label_std.to(device)
         
-        # Pre-extract geographic ID mapping for fast logging
         node_to_geo_id = dict(zip(data.cells_gdf['node_id'], data.cells_gdf['id']))
         
         logging.info("\n" + "="*80)
@@ -676,7 +670,6 @@ def train():
                 )
                 b_E_grid = final_E[subset]
                 
-                # Get normalized predictions
                 final_preds_norm, _ = task_model(
                     E_grid=b_E_grid, 
                     grid_edge_index=sub_edge_index, 
@@ -687,22 +680,18 @@ def train():
                     grid_to_batch_idx=grid_to_batch_idx
                 )
                 
-                # --- UN-NORMALIZE ---
-                # Convert Z-scores back into actual land value rates
                 real_values = (labels_norm.view(-1) * label_std) + label_mean
                 predicted_values = (final_preds_norm * label_std) + label_mean
                 
                 real_np = real_values.cpu().numpy()
                 pred_np = predicted_values.cpu().numpy()
                 
-                # THE FIX: Ensure indices are flattened before converting to numpy
                 grids_np = target_grid_indices.view(-1).cpu().numpy()
                 
                 all_real.extend(real_np)
                 all_pred.extend(pred_np)
                 all_grid_ids.extend(grids_np)
                 
-                # Print a few samples from each batch to inspect during training
                 sample_size = min(3, len(grids_np)) 
                 for i in range(sample_size):
                     g_idx = grids_np[i]
@@ -714,7 +703,6 @@ def train():
                     err = abs(r_val - p_val)
                     logging.info(f"{g_idx:<10} | {geo_id:<10} | {r_idx:<10} | {r_val:<12.4f} | {p_val:<12.4f} | {err:<12.4f}")
 
-        # Calculate Final Real-World Metrics
         all_real = np.array(all_real)
         all_pred = np.array(all_pred)
         all_errs = all_pred - all_real
@@ -725,14 +713,13 @@ def train():
         rmse = np.sqrt(mse)
         
         logging.info("="*80)
-        logging.info(f"FINAL TEST METRICS (Un-Normalized / Real Units)")
+        logging.info(f"FINAL TEST METRICS")
         logging.info(f"Total Test Grids Evaluated: {len(all_real)}")
         logging.info(f"Mean Absolute Error (MAE): {mae:.4f}")
         logging.info(f"Mean Squared Error (MSE):  {mse:.4f}")
         logging.info(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
         logging.info("="*80)
 
-        # Merge correctly using the perfectly aligned node_ids
         results_df = pd.DataFrame({
             'node_id': all_grid_ids,
             'real_value': all_real,
@@ -741,16 +728,13 @@ def train():
             'abs_error': all_errs_abs
         })
         
-        # The inner merge cleanly attaches predictions to the correct polygons
         merged_gdf = data.cells_gdf.merge(results_df, on='node_id', how='inner')
         
         os.makedirs("./result", exist_ok=True)
         
-        # Export to CSV
         csv_path = "./result/test_predictions.csv"
         merged_gdf.to_csv(csv_path, index=False)
         
-        # Export to GPKG for direct QGIS usage
         gpkg_path = "./result/test_predictions.gpkg"
         merged_gdf.to_file(gpkg_path, driver="GPKG")
         
